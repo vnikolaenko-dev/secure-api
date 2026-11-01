@@ -1,0 +1,80 @@
+name: Build and security
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  test-and-sast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - run: chmod +x mvnw
+      - run: ./mvnw -B -ntp verify spotbugs:check 2>&1 | tee build.log
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tests-and-sast
+          path: |
+            target/surefire-reports/
+            target/spotbugs*.xml
+            build.log
+  sca:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: sca-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - run: chmod +x mvnw
+      - name: Check NVD credentials
+        shell: bash
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          if [[ -z "$NVD_API_KEY" ]]; then
+            echo '::error::Set the activated repository secret NVD_API_KEY. Fork PRs do not receive secrets; run the reviewed change in a trusted branch.'
+            exit 1
+          fi
+      - name: Restore vulnerability database
+        id: nvd-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .dependency-check-data
+          key: dependency-check-13-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            dependency-check-13-${{ runner.os }}-
+      - name: Update vulnerability database
+        id: nvd-update
+        timeout-minutes: 30
+        run: ./scripts/sca.ps1 -Mode Update
+        shell: pwsh
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+      - name: Save updated vulnerability database
+        uses: actions/cache/save@v4
+        with:
+          path: .dependency-check-data
+          key: ${{ steps.nvd-cache.outputs.cache-primary-key }}
+      - name: Scan dependencies
+        timeout-minutes: 10
+        run: ./scripts/sca.ps1 -Mode Scan
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sca-report
+          path: |
+            target/dependency-check-report.*
+            sca.log
